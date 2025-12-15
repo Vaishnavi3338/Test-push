@@ -1,0 +1,76 @@
+# Copy this file into the target repo at .github/workflows/auto-pr-manifests.yml
+# It auto-creates, approves, and merges a PR into master whenever a push happens to manifests-like branches.
+
+name: Auto PR for manifests branches
+
+on:
+  push:
+    branches:
+      - 'manifests/**'
+      - 'nbo-manifests/**'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create, approve, and merge PR to master
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const base = 'master';
+            const head = context.ref.replace('refs/heads/', '');
+            const { owner, repo } = context.repo;
+
+            if (head === base) {
+              core.info(`Head is base (${base}); skipping.`);
+              return;
+            }
+
+            // Create PR or reuse existing one if it already exists
+            let pr;
+            try {
+              const created = await github.rest.pulls.create({
+                owner, repo, base, head,
+                title: `Auto PR: ${head} → ${base}`,
+                body: `Automated PR for branch ${head} targeting ${base}.`
+              });
+              pr = created.data;
+              core.info(`Created PR #${pr.number}`);
+            } catch (e) {
+              if (e.status === 422) {
+                // Likely "A pull request already exists" — fetch it by head filter
+                const { data: prs } = await github.rest.pulls.list({
+                  owner, repo, state: 'open', base, head: `${owner}:${head}`
+                });
+                if (prs.length === 0) throw e;
+                pr = prs[0];
+                core.info(`Reusing existing PR #${pr.number}`);
+              } else {
+                throw e;
+              }
+            }
+
+            // Approve as github-actions bot
+            try {
+              await github.rest.pulls.createReview({
+                owner, repo, pull_number: pr.number, event: 'APPROVE'
+              });
+              core.info(`Approved PR #${pr.number}`);
+            } catch (e) {
+              core.warning(`Approval failed: ${e.message}`);
+            }
+
+            // Merge
+            try {
+              await github.rest.pulls.merge({
+                owner, repo, pull_number: pr.number, merge_method: 'merge'
+              });
+              core.info(`Merged PR #${pr.number} into ${base}`);
+            } catch (e) {
+              core.warning(`Merge failed: ${e.message}. Possibly branch protection or required checks.`);
+              throw e;
+            } 
