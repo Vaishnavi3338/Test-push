@@ -1,7 +1,5 @@
 # Copy this file into the target repo at .github/workflows/auto-pr-manifests.yml
 # It auto-creates, approves, and merges a PR into master whenever a push happens to manifests-like branches.
-
-
 name: Auto PR for manifests branches
 
 on:
