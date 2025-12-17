@@ -21,29 +21,38 @@ jobs:
         with:
           script: |
             const base = "master";
-            const head = context.ref.replace("refs/heads/", "");
             const { owner, repo } = context.repo;
+            const head = context.ref.replace("refs/heads/", "");
 
             if (head === base) {
-              core.info("Head is base; skipping.");
+              core.info("Head equals base; skipping.");
               return;
             }
 
-            // 1) Create or reuse PR
             let pr;
             try {
               const created = await github.rest.pulls.create({
-                owner, repo, base, head,
+                owner: owner,
+                repo: repo,
+                base: base,
+                head: head,
                 title: `Auto PR: ${head} → ${base}`
               });
               pr = created.data;
               core.info(`Created PR #${pr.number}`);
             } catch (e) {
               if (e.status === 422) {
-                const { data: prs } = await github.rest.pulls.list({
-                  owner, repo, state: "open", base, head: `${owner}:${head}`
+                const prsList = await github.rest.pulls.list({
+                  owner: owner,
+                  repo: repo,
+                  state: "open",
+                  base: base,
+                  head: `${owner}:${head}`
                 });
-                if (!prs.length) throw e;
+                const prs = prsList.data;
+                if (prs.length === 0) {
+                  throw e;
+                }
                 pr = prs[0];
                 core.info(`Reusing PR #${pr.number}`);
               } else {
@@ -51,28 +60,31 @@ jobs:
               }
             }
 
-            // 2) Try to approve (may not count for required human/CO)
             try {
               await github.rest.pulls.createReview({
-                owner, repo, pull_number: pr.number, event: "APPROVE"
+                owner: owner,
+                repo: repo,
+                pull_number: pr.number,
+                event: "APPROVE"
               });
-              core.info("Approved PR.");
+              core.info("Approved PR (bot).");
             } catch (e) {
               core.info(`Bot approval skipped: ${e.message}`);
             }
 
-            // 3) Wait for mergeable_state === "clean"
-            const maxWaitMs = 20 * 60 * 1000; // 20 minutes
-            const intervalMs = 10 * 1000;     // 10 seconds
+            const maxWaitMs = 20 * 60 * 1000;
+            const intervalMs = 10 * 1000;
             const deadline = Date.now() + maxWaitMs;
 
-            core.info("Waiting for checks/reviews (mergeable_state='clean')...");
             while (Date.now() < deadline) {
-              const prStatus = (await github.rest.pulls.get({
-                owner, repo, pull_number: pr.number
-              })).data;
+              const prStatusResp = await github.rest.pulls.get({
+                owner: owner,
+                repo: repo,
+                pull_number: pr.number
+              });
+              const prStatus = prStatusResp.data;
 
-              core.info(`mergeable_state: ${prStatus.mergeable_state}`);
+              core.info(`mergeable_state=${prStatus.mergeable_state}`);
 
               if (prStatus.mergeable_state === "clean") {
                 break;
@@ -81,18 +93,22 @@ jobs:
               await new Promise(resolve => setTimeout(resolve, intervalMs));
             }
 
-            // Final check before merge
-            const finalPR = (await github.rest.pulls.get({
-              owner, repo, pull_number: pr.number
-            })).data;
+            const finalPRResp = await github.rest.pulls.get({
+              owner: owner,
+              repo: repo,
+              pull_number: pr.number
+            });
+            const finalPR = finalPRResp.data;
 
             if (finalPR.mergeable_state !== "clean") {
-              throw new Error(`Timeout waiting for protections. Final mergeable_state=${finalPR.mergeable_state}`);
+              throw new Error(`Timeout: protections not satisfied. mergeable_state=${finalPR.mergeable_state}`);
             }
 
-            // 4) Merge (change to 'squash' or 'rebase' if ruleset requires)
             await github.rest.pulls.merge({
-              owner, repo, pull_number: pr.number, merge_method: "merge"
+              owner: owner,
+              repo: repo,
+              pull_number: pr.number,
+              merge_method: "merge"
             });
 
-            core.info(`Merged PR #${pr.number} into ${
+           
