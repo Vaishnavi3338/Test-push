@@ -133,4 +133,4 @@ jobs:
             });
             core.info(`Merged PR #${pr_number} into ${base}.`);
         env:
-          PR_NUMBER: ${{ steps.pr.outputs.pr_number
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number}}
