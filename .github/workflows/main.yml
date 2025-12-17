@@ -4,7 +4,7 @@ name: Auto_PR_for_manifests_branches
 on:
   push:
     branches:
-      - 'nbo-manifests/**'
+      - "nbo-manifests/**"
 
 permissions:
   contents: write
@@ -21,15 +21,15 @@ jobs:
         with:
           script: |
             const base = "master";
-            const { owner, repo } = context.repo;
             const head = context.ref.replace("refs/heads/", "");
+            const { owner, repo } = context.repo;
 
             if (head === base) {
-              core.info("No PR needed for base branch.");
+              core.info("Head is base; skipping.");
               return;
             }
 
-            // --- 1. Create or reuse PR ---
+            // 1) Create or reuse PR
             let pr;
             try {
               const created = await github.rest.pulls.create({
@@ -41,8 +41,7 @@ jobs:
             } catch (e) {
               if (e.status === 422) {
                 const { data: prs } = await github.rest.pulls.list({
-                  owner, repo, state: "open", base,
-                  head: `${owner}:${head}`
+                  owner, repo, state: "open", base, head: `${owner}:${head}`
                 });
                 if (!prs.length) throw e;
                 pr = prs[0];
@@ -52,55 +51,48 @@ jobs:
               }
             }
 
-            // --- 2. Approve PR (may not count if human/CO required) ---
+            // 2) Try to approve (may not count for required human/CO)
             try {
               await github.rest.pulls.createReview({
-                owner, repo, pull_number: pr.number,
-                event: "APPROVE"
+                owner, repo, pull_number: pr.number, event: "APPROVE"
               });
               core.info("Approved PR.");
             } catch (e) {
-              core.info("Bot approval not allowed or not needed.");
+              core.info(`Bot approval skipped: ${e.message}`);
             }
 
-            // --- 3. Wait until PR is mergeable_state = 'clean' ---
-            const maxWait = 20 * 60 * 1000; // 20 minutes
-            const interval = 10 * 1000;     // 10 sec
-            const endTime = Date.now() + maxWait;
+            // 3) Wait for mergeable_state === "clean"
+            const maxWaitMs = 20 * 60 * 1000; // 20 minutes
+            const intervalMs = 10 * 1000;     // 10 seconds
+            const deadline = Date.now() + maxWaitMs;
 
-            core.info("Waiting for all required checks to pass...");
-
-            while (Date.now() < endTime) {
+            core.info("Waiting for checks/reviews (mergeable_state='clean')...");
+            while (Date.now() < deadline) {
               const prStatus = (await github.rest.pulls.get({
                 owner, repo, pull_number: pr.number
               })).data;
 
-              core.info(`mergeable_state = ${prStatus.mergeable_state}`);
+              core.info(`mergeable_state: ${prStatus.mergeable_state}`);
 
               if (prStatus.mergeable_state === "clean") {
-                core.info("PR is ready to merge.");
                 break;
               }
 
-              if (["dirty", "blocked"].includes(prStatus.mergeable_state)) {
-                core.info("PR is blocked by checks                core.info("PR is blocked by checks/reviews. Continuing to wait...");
-              }
-
-              await new Promise(r => setTimeout(r, interval));
+              await new Promise(resolve => setTimeout(resolve, intervalMs));
             }
 
-            // Re-check
+            // Final check before merge
             const finalPR = (await github.rest.pulls.get({
               owner, repo, pull_number: pr.number
             })).data;
 
             if (finalPR.mergeable_state !== "clean") {
-              throw new Error(`Checks didn't pass in time. mergeable_state=${finalPR.mergeable_state}`);
+              throw new Error(`Timeout waiting for protections. Final mergeable_state=${finalPR.mergeable_state}`);
             }
 
-            // --- 4. Merge ---
+            // 4) Merge (change to 'squash' or 'rebase' if ruleset requires)
             await github.rest.pulls.merge({
-              owner, repo, pull_number: pr.number,
-              merge_method: "merge"
+              owner, repo, pull_number: pr.number, merge_method: "merge"
             });
 
+            core.info(`Merged PR #${pr.number} into ${
