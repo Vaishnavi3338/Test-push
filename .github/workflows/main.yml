@@ -16,145 +16,91 @@ jobs:
   auto-pr:
     runs-on: ubuntu-latest
     steps:
-      - name: Create, approve, wait for checks, and merge PR to master
+      - name: Create/Reuse PR → Approve → Wait → Merge
         uses: actions/github-script@v7
-        env:
-          BASE_BRANCH: main          # change to 'main' if needed
-          MERGE_METHOD: merge          # 'merge' | 'squash' | 'rebase'
-          WAIT_MINUTES: "30"           # max wait time for checks
-          CHECK_INTERVAL_SECONDS: "10" # poll frequency
         with:
           script: |
-            const base = process.env.BASE_BRANCH || 'master';
+            const base = "master";
             const { owner, repo } = context.repo;
-            const head = context.ref.replace('refs/heads/', '');
+            const head = context.ref.replace("refs/heads/", "");
 
             if (head === base) {
-              core.info(`Head equals base (${base}); nothing to do.`);
+              core.info("No PR needed for base branch.");
               return;
             }
 
-            // Create PR or reuse existing open PR for this head→base
+            // --- 1. Create or reuse PR ---
             let pr;
             try {
               const created = await github.rest.pulls.create({
                 owner, repo, base, head,
-                title: `Auto PR: ${head} → ${base}`,
-                body: `Automated PR for branch ${head} targeting ${base}.`
+                title: `Auto PR: ${head} → ${base}`
               });
               pr = created.data;
               core.info(`Created PR #${pr.number}`);
             } catch (e) {
               if (e.status === 422) {
-                // PR likely already exists; list and reuse it
                 const { data: prs } = await github.rest.pulls.list({
-                  owner, repo, state: 'open', base, head: `${owner}:${head}`
+                  owner, repo, state: "open", base,
+                  head: `${owner}:${head}`
                 });
                 if (!prs.length) throw e;
                 pr = prs[0];
-                core.info(`Reusing existing PR #${pr.number}`);
+                core.info(`Reusing PR #${pr.number}`);
               } else {
                 throw e;
               }
             }
 
-            // Try to approve as github-actions[bot] (may not satisfy human/CO rules)
+            // --- 2. Approve PR (may not count if human/CO required) ---
             try {
               await github.rest.pulls.createReview({
-                owner, repo, pull_number: pr.number, event: 'APPROVE'
+                owner, repo, pull_number: pr.number,
+                event: "APPROVE"
               });
-              core.info(`Approved PR #${pr.number}`);
+              core.info("Approved PR.");
             } catch (e) {
-              core.warning(`Bot approval failed or not permitted: ${e.message}`);
+              core.info("Bot approval not allowed or not needed.");
             }
 
-            // ===== Wait for checks & statuses to complete successfully =====
-            const sha = pr.head.sha;
-            const maxMinutes = parseInt(process.env.WAIT_MINUTES || '30', 10);
-            const intervalSec = parseInt(process.env.CHECK_INTERVAL_SECONDS || '10', 10);
-            const deadline = Date.now() + maxMinutes * 60 * 1000;
+            // --- 3. Wait until PR is mergeable_state = 'clean' ---
+            const maxWait = 20 * 60 * 1000; // 20 minutes
+            const interval = 10 * 1000;     // 10 sec
+            const endTime = Date.now() + maxWait;
 
-            const sleep = ms => new Promise(r => setTimeout(r, ms));
+            core.info("Waiting for all required checks to pass...");
 
-            function summarizeChecks(runs) {
-              const byConclusion = {};
-              for (const r of runs) {
-                const key = r.conclusion || r.status;
-                byConclusion[key] = (byConclusion[key] || 0) + 1;
-              }
-              return Object.entries(byConclusion).map(([k, v]) => `${k}:${v}`).join(', ');
-            }
-
-            function summarizeStatuses(statuses) {
-              const names = statuses.map(s => `${s.context}:${s.state}`);
-              return names.join(', ');
-            }
-
-            // Poll until:
-            //  - Checks API: no runs queued/in_progress AND no failures/cancelled/timeouts/action_required
-            //  - Statuses API: combined state not 'pending' or 'failure'
-            //  - PR mergeable_state is 'clean' and mergeable === true
-            while (Date.now() < deadline) {
-              // Refresh PR state (mergeability often lags after new statuses)
-              const prLatest = (await github.rest.pulls.get({
+            while (Date.now() < endTime) {
+              const prStatus = (await github.rest.pulls.get({
                 owner, repo, pull_number: pr.number
               })).data;
 
-              // Checks API (GitHub Apps / Actions checks)
-              const checksResp = await github.rest.checks.listForRef({
-                owner, repo, ref: sha
-              });
-              const runs = checksResp.data.check_runs;
+              core.info(`mergeable_state = ${prStatus.mergeable_state}`);
 
-              // Statuses API (legacy commit statuses)
-              const statusesResp = await github.rest.repos.getCombinedStatusForRef({
-                owner, repo, ref: sha
-              });
-              const combinedState = statusesResp.data.state; // success | failure | pending
-              const statuses = statusesResp.data.statuses;
-
-              const hasRuns = runs.length > 0;
-              const inProgress = runs.some(r => ['queued','in_progress'].includes(r.status));
-              const failedRun = runs.some(r =>
-                ['failure','cancelled','timed_out','action_required'].includes(r.conclusion)
-              );
-
-              const statusesPending = combinedState === 'pending';
-              const statusesFailed = combinedState === 'failure';
-
-              core.info(`Checks: ${hasRuns ? summarizeChecks(runs) : 'none'} | Combined statuses: ${combinedState} (${summarizeStatuses(statuses)}) | mergeable_state=${prLatest.mergeable_state} mergeable=${prLatest.mergeable}`);
-
-              const checksOK = !inProgress && !failedRun;
-              const statusesOK = !statusesPending && !statusesFailed;
-              const mergeableOK = prLatest.mergeable === true && prLatest.mergeable_state === 'clean';
-
-              if (checksOK && statusesOK && mergeableOK) {
-                core.info('All required checks/statuses succeeded and PR is mergeable. Proceeding to merge.');
+              if (prStatus.mergeable_state === "clean") {
+                core.info("PR is ready to merge.");
                 break;
               }
 
-              // If any hard failure detected, abort early with details
-              if (failedRun || statusesFailed) {
-                core.setFailed('One or                core.setFailed('One or more checks/statuses failed. Merge blocked by protections.');
-                return;
+              if (["dirty", "blocked"].includes(prStatus.mergeable_state)) {
+                core.info("PR is blocked by checks                core.info("PR is blocked by checks/reviews. Continuing to wait...");
               }
 
-              await sleep(intervalSec * 1000);
+              await new Promise(r => setTimeout(r, interval));
             }
 
-            // If we exit the loop due to timeout, surface a clear error
-            const nowMergeable = (await github.rest.pulls.get({ owner, repo, pull_number: pr.number })).data;
-            if (!(nowMergeable.mergeable === true && nowMergeable.mergeable_state === 'clean')) {
-              throw new Error(`Timeout waiting for checks/rules to pass (waited ${process.env.WAIT_MINUTES} mins). Current mergeable_state=${nowMergeable.mergeable_state}. Ensure required reviews/Code Owners approvals and all checks (e.g., Arnica) are successful.`);
+            // Re-check
+            const finalPR = (await github.rest.pulls.get({
+              owner, repo, pull_number: pr.number
+            })).data;
+
+            if (finalPR.mergeable_state !== "clean") {
+              throw new Error(`Checks didn't pass in time. mergeable_state=${finalPR.mergeable_state}`);
             }
 
-            // ===== Merge (respect allowed method) =====
-            try {
-              await github.rest.pulls.merge({
-                owner, repo, pull_number: pr.number,
-                merge_method: process.env.MERGE_METHOD || 'merge'
-              });
-              core.info(`Merged PR #${pr.number} into ${base}`);
-            } catch (e) {
-              core.warning(`Merge failed: ${e.message}`);
-              throw e;
+            // --- 4. Merge ---
+            await github.rest.pulls.merge({
+              owner, repo, pull_number: pr.number,
+              merge_method: "merge"
+            });
+
