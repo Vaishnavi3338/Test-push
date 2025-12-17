@@ -4,7 +4,7 @@ name: Auto_PR_for_manifests_branches
 on:
   push:
     branches:
-      - "nbo-manifests/**"
+      - 'nbo-manifests/**'
 
 permissions:
   contents: write
@@ -16,99 +16,121 @@ jobs:
   auto-pr:
     runs-on: ubuntu-latest
     steps:
-      - name: Create/Reuse PR → Approve → Wait → Merge
+      - name: Create or reuse PR to main
+        id: pr
         uses: actions/github-script@v7
         with:
           script: |
-            const base = "main";
+            const base = 'main'; // change if your default branch is 'master'
+            const head = context.ref.replace('refs/heads/', '');
             const { owner, repo } = context.repo;
-            const head = context.ref.replace("refs/heads/", "");
 
             if (head === base) {
-              core.info("Head equals base; skipping.");
+              core.info(`Head is base (${base}); skipping.`);
               return;
             }
 
             let pr;
             try {
               const created = await github.rest.pulls.create({
-                owner: owner,
-                repo: repo,
-                base: base,
-                head: head,
-                title: `Auto PR: ${head} → ${base}`
+                owner, repo, base, head,
+                title: `Auto PR: ${head} → ${base}`,
+                body: `Automated PR for branch ${head} targeting ${base}.`
               });
               pr = created.data;
               core.info(`Created PR #${pr.number}`);
             } catch (e) {
               if (e.status === 422) {
-                const prsList = await github.rest.pulls.list({
-                  owner: owner,
-                  repo: repo,
-                  state: "open",
-                  base: base,
-                  head: `${owner}:${head}`
+                const { data: prs } = await github.rest.pulls.list({
+                  owner, repo, state: 'open', base, head: `${owner}:${head}`
                 });
-                const prs = prsList.data;
-                if (prs.length === 0) {
-                  throw e;
-                }
+                if (prs.length === 0) throw e;
                 pr = prs[0];
-                core.info(`Reusing PR #${pr.number}`);
+                core.info(`Reusing existing PR #${pr.number}`);
               } else {
                 throw e;
               }
             }
+            core.setOutput('pr_number', String(pr.number));
 
-            try {
-              await github.rest.pulls.createReview({
-                owner: owner,
-                repo: repo,
-                pull_number: pr.number,
-                event: "APPROVE"
-              });
-              core.info("Approved PR (bot).");
-            } catch (e) {
-              core.info(`Bot approval skipped: ${e.message}`);
+      # (Optional) If your ruleset requires branch up-to-date, try updating when behind/dirty
+      - name: Update branch if PR is behind/dirty
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr_number = Number(process.env.PR_NUMBER);
+            const getPR = async () => (await github.rest.pulls.get({ owner, repo, pull_number: pr_number })).data;
+
+            let pr = await getPR();
+            const s = pr.mergeable_state;
+            core.info(`Initial mergeable_state=${s}`);
+            if (s === 'behind' || s === 'dirty') {
+              try {
+                await github.rest.pulls.updateBranch({ owner, repo, pull_number: pr_number });
+                core.info('Triggered branch update to catch up with base.');
+              } catch (e) {
+                core.info(`UpdateBranch not possible or failed: ${e.message}`);
+              }
             }
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
 
-            const maxWaitMs = 20 * 60 * 1000;
+      - name: Wait until PR is mergeable (clean), then merge
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const base = 'main';                // keep consistent with first step
+            const mergeMethod = 'merge';        // change to 'squash' or 'rebase' if your ruleset requires
+            const { owner, repo } = context.repo;
+            const pr_number = Number(process.env.PR_NUMBER);
+            const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+            const getPR = async () => (await github.rest.pulls.get({ owner, repo, pull_number: pr_number })).data;
+
+            // Warm-up wait so checks start and mergeability is computed
+            core.info('Warm-up: waiting 30s for checks/mergeability to initialize...');
+            await sleep(30000);
+
+            const maxWaitMs = 30 * 60 * 1000; // 30 minutes
             const intervalMs = 10 * 1000;
             const deadline = Date.now() + maxWaitMs;
 
             while (Date.now() < deadline) {
-              const prStatusResp = await github.rest.pulls.get({
-                owner: owner,
-                repo: repo,
-                pull_number: pr.number
-              });
-              const prStatus = prStatusResp.data;
+              const pr = await getPR();
+              const s = pr.mergeable_state;
+              core.info(`mergeable_state=${s}`);
 
-              core.info(`mergeable_state=${prStatus.mergeable_state}`);
+              if (s === 'clean') break;
 
-              if (prStatus.mergeable_state === "clean") {
-                break;
+              if (s === 'behind' || s === 'dirty') {
+                try {
+                  await github.rest.pulls.updateBranch({ owner, repo, pull_number: pr_number });
+                  core.info('Attempted branch update to catch up with base.');
+                } catch (e) {
+                  core.info(`UpdateBranch attempt failed or not allowed: ${e.message}`);
+                }
+              } else if (s === 'blocked') {
+                core.info('Waiting for required checks/reviews per ruleset...');
+              } else if (s === 'unstable' || s === 'unknown' || s === 'has_hooks') {
+                core.info('Checks/hooks running or mergeability computing; waiting...');
+              } else if (s === 'conflicting') {
+                throw new Error('Merge conflicts detected. Please resolve conflicts on the branch.');
+              } else if (s === 'draft') {
+                throw new Error('PR is a draft. Mark it ready for review to allow merging.');
               }
 
-              await new Promise(resolve => setTimeout(resolve, intervalMs));
+              await sleep(intervalMs);
             }
 
-            const finalPRResp = await github.rest.pulls.get({
-              owner: owner,
-              repo: repo,
-              pull_number: pr.number
-            });
-            const finalPR = finalPRResp.data;
-
-            if (finalPR.mergeable_state !== "clean") {
-              throw new Error(`Timeout: protections not satisfied. mergeable_state=${finalPR.mergeable_state}`);
+            const final = await getPR();
+            if (final.mergeable_state !== 'clean') {
+              throw new Error(`Timeout waiting for protections. Final mergeable_state=${final.mergeable_state}`);
             }
 
             await github.rest.pulls.merge({
-              owner: owner,
-              repo: repo,
-              pull_number: pr.number,
-              merge_method: "merge"
+              owner, repo, pull_number: pr_number, merge_method: mergeMethod
             });
-
-           
+            core.info(`Merged PR #${pr_number} into ${base}.`);
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number}}
