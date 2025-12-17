@@ -1,114 +1,136 @@
-
 name: Auto_PR_for_manifests_branches
 
 on:
   push:
     branches:
-      - "nbo-manifests/**"
+      - 'nbo-manifests/**'
 
 permissions:
   contents: write
   pull-requests: write
-  checks: read
-  statuses: read
 
 jobs:
   auto-pr:
     runs-on: ubuntu-latest
     steps:
-      - name: Create/Reuse PR → Approve → Wait → Merge
+      - name: Create or reuse PR to master
+        id: pr
         uses: actions/github-script@v7
         with:
           script: |
-            const base = "main";
+            const base = 'main';
+            const head = context.ref.replace('refs/heads/', '');
             const { owner, repo } = context.repo;
-            const head = context.ref.replace("refs/heads/", "");
 
             if (head === base) {
-              core.info("Head equals base; skipping.");
+              core.info(`Head is base (${base}); skipping.`);
               return;
             }
 
+            // Create PR or reuse existing one if it already exists
             let pr;
             try {
               const created = await github.rest.pulls.create({
-                owner: owner,
-                repo: repo,
-                base: base,
-                head: head,
-                title: `Auto PR: ${head} → ${base}`
+                owner, repo, base, head,
+                title: `Auto PR: ${head} → ${base}`,
+                body: `Automated PR for branch ${head} targeting ${base}.`
               });
               pr = created.data;
               core.info(`Created PR #${pr.number}`);
             } catch (e) {
               if (e.status === 422) {
-                const prsList = await github.rest.pulls.list({
-                  owner: owner,
-                  repo: repo,
-                  state: "open",
-                  base: base,
-                  head: `${owner}:${head}`
+                // Likely "A pull request already exists" — fetch it by head filter
+                const { data: prs } = await github.rest.pulls.list({
+                  owner, repo, state: 'open', base, head: `${owner}:${head}`
                 });
-                const prs = prsList.data;
-                if (prs.length === 0) {
-                  throw e;
-                }
+                if (prs.length === 0) throw e;
                 pr = prs[0];
-                core.info(`Reusing PR #${pr.number}`);
+                core.info(`Reusing existing PR #${pr.number}`);
               } else {
                 throw e;
               }
             }
+            core.setOutput('pr_number', pr.number);
+            core.setOutput('pr_head_sha', pr.head.sha);
 
+      - name: Approve PR as github-actions bot
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr_number = process.env.PR_NUMBER || core.getInput('pr_number');
             try {
               await github.rest.pulls.createReview({
-                owner: owner,
-                repo: repo,
-                pull_number: pr.number,
-                event: "APPROVE"
+                owner, repo, pull_number: pr_number, event: 'APPROVE'
               });
-              core.info("Approved PR (bot).");
+              core.info(`Approved PR #${pr_number}`);
             } catch (e) {
-              core.info(`Bot approval skipped: ${e.message}`);
+              core.warning(`Approval failed: ${e.message}`);
             }
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
 
-            const maxWaitMs = 20 * 60 * 1000;
-            const intervalMs = 10 * 1000;
-            const deadline = Date.now() + maxWaitMs;
+      - name: Wait for required status checks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr_number = process.env.PR_NUMBER || core.getInput('pr_number');
+            const pr_head_sha = process.env.PR_HEAD_SHA || core.getInput('pr_head_sha');
 
-            while (Date.now() < deadline) {
-              const prStatusResp = await github.rest.pulls.get({
-                owner: owner,
-                repo: repo,
-                pull_number: pr.number
+            // Optionally, can specify required checks by name:
+            // const requiredChecks = ['Arnica Pipelineless Code Risks scan'];
+            // If left empty, waits for all checks to complete (success or failure)
+            const requiredChecks = [];
+
+            const sleep = ms => new Promise(res => setTimeout(res, ms));
+            let allPassed = false;
+            for (let i = 0; i < 60; i++) { // Wait up to 10 minutes
+              const { data: combined } = await github.rest.repos.getCombinedStatusForRef({
+                owner, repo, ref: pr_head_sha
               });
-              const prStatus = prStatusResp.data;
+              const statuses = combined.statuses;
+              let pending = statuses.filter(s => s.state === 'pending');
+              let failed = statuses.filter(s => s.state === 'failure' || s.state === 'error');
+              let requiredFailed = requiredChecks.length
+                ? failed.filter(s => requiredChecks.includes(s.context))
+                : failed;
+              let requiredPending = requiredChecks.length
+                ? pending.filter(s => requiredChecks.includes(s.context))
+                : pending;
 
-              core.info(`mergeable_state=${prStatus.mergeable_state}`);
-
-              if (prStatus.mergeable_state === "clean") {
+              if (requiredFailed.length > 0) {
+                throw new Error(`Required status checks failed: ${requiredFailed.map(s => s.context).join(', ')}`);
+              }
+              if (requiredPending.length === 0 && (requiredChecks.length === 0 || statuses.length > 0)) {
+                allPassed = true;
                 break;
               }
-
-              await new Promise(resolve => setTimeout(resolve, intervalMs));
+              core.info(`Waiting for required checks: ${requiredPending.map(s => s.context).join(', ') || '(all checks pending)'}`);
+              await sleep(10000); // Wait 10 seconds
             }
-
-            const finalPRResp = await github.rest.pulls.get({
-              owner: owner,
-              repo: repo,
-              pull_number: pr.number
-            });
-            const finalPR = finalPRResp.data;
-
-            if (finalPR.mergeable_state !== "clean") {
-              throw new Error(`Timeout: protections not satisfied. mergeable_state=${finalPR.mergeable_state}`);
+            if (!allPassed) {
+              throw new Error('Timed out waiting for required status checks.');
             }
+            core.info('All required status checks passed.');
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.pr_head_sha }}
 
-            await github.rest.pulls.merge({
-              owner: owner,
-              repo: repo,
-              pull_number: pr.number,
-              merge_method: "merge"
-            });
-
-           
+      - name: Merge PR to master
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr_number = process.env.PR_NUMBER || core.getInput('pr_number');
+            try {
+              await github.rest.pulls.merge({
+                owner, repo, pull_number: pr_number, merge_method: 'merge'
+              });
+              core.info(`Merged PR #${pr_number} into master`);
+            } catch (e) {
+              core.warning(`Merge failed: ${e.message}. Possibly branch protection or required checks.`);
+              throw e;
+            }
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
