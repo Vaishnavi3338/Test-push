@@ -3,11 +3,14 @@ name: Auto_PR_for_manifests_branches
 on:
   push:
     branches:
-      - 'nbo-manifests/**'
+      - 'vlakk/test'
 
 permissions:
   contents: write
   pull-requests: write
+  checks: read
+  statuses: rea
+
 
 jobs:
   auto-pr:
@@ -18,7 +21,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const base = 'main';
+            const base = 'vlakk/test-master';
             const head = context.ref.replace('refs/heads/', '');
             const { owner, repo } = context.repo;
 
