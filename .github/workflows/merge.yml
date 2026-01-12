@@ -1,0 +1,17 @@
+
+# .github/workflows/on-pr-merged.yml
+name: Run on PR merged to master
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - master
+
+jobs:
+  run-on-merge:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "PR was merged into master."
