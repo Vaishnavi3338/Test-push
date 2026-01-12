@@ -1,3 +1,4 @@
 Test 1
 test 2
 test 3 - checking trigger
+test 4 - checking trigger without merge PR
