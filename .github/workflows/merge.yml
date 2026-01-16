@@ -17,7 +17,7 @@ on:
 
   # Trigger after the merge workflow completes on master
   workflow_run:
-    workflows: ["Workflow A Name"]   # <-- exact name of the workflow that merges PRs
+    workflows: ["Auto_PR_for_manifests_branches"]   # <-- exact name of the workflow that merges PRs
     branches:
       - master
     types:
