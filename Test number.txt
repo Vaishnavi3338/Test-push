@@ -4,3 +4,4 @@ test 3 - checking trigger
 test 4 -skipped
 test 5 - checking auto pr and merge
 testing workflow trigger by providing name
+testing manually 
