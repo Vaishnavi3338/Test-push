@@ -5,3 +5,4 @@ test 4 -skipped
 test 5 - checking auto pr and merge
 testing workflow trigger by providing name
 testing manually 
+test maunal PR
