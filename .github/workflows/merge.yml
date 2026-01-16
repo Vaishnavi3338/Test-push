@@ -3,15 +3,36 @@
 name: Run on PR merged to master
 
 on:
-  pull_request:
-    types: [closed]
+  # Manual run
+  workflow_dispatch:
+
+  # External POST-trigger
+  repository_dispatch:
+    types: [externally-triggered-job]
+
+  # Pushes to master (e.g., human merges or direct pushes)
+  push:
     branches:
-      - main
+      - master
+
+  # Trigger after the merge workflow completes on master
+  workflow_run:
+    workflows: ["Workflow A Name"]   # <-- exact name of the workflow that merges PRs
+    branches:
+      - master
+    types:
+      - completed
 
 jobs:
-  run-on-merge:
-    if: github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
+  build:
+    # Run if:
+    # - it's NOT a workflow_run event (i.e., dispatch/push), OR
+    # - it IS a workflow_run and that upstream run concluded successfully
+    if: >
+      github.event_name != 'workflow_run' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    runs-on: [self-hosted, chef, Linux]
     steps:
       - uses: actions/checkout@v4
       - run: echo "PR was merged into master."
