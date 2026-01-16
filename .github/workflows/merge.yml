@@ -32,7 +32,7 @@ jobs:
       github.event_name != 'workflow_run' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
-    runs-on: [self-hosted, chef, Linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: echo "PR was merged into master."
