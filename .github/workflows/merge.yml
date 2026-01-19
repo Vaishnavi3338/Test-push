@@ -10,27 +10,32 @@ on:
   repository_dispatch:
     types: [externally-triggered-job]
 
-  # Pushes to master (e.g., human merges or direct pushes)
+  # Pushes to master (or main)
   push:
     branches:
-      - main
+      - main   # change to "master" if needed
 
-  # Trigger after the merge workflow completes on master
+  # Trigger after the merge workflow completes
   workflow_run:
-    workflows: ["Auto_PR_for_manifests_branches"]   # <-- exact name of the workflow that merges PRs
+    workflows: ["Auto_PR_for_manifests_branches"]
     types:
       - completed
 
 jobs:
   build:
-    # Run if:
-    # - it's NOT a workflow_run event (i.e., dispatch/push), OR
-    # - it IS a workflow_run and that upstream run concluded successfully
+    # Conditions:
+    # - run for push/dispatch
+    # - run for workflow_run only if success
     if: >
       github.event_name != 'workflow_run' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      - run: echo "PR was merged into master."
+
+      - name: Test push
+        run: |
+          echo "PR was merged into master."
+          git push origin HEAD:test_trigger
