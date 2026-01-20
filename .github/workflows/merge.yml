@@ -40,6 +40,13 @@ jobs:
       - name: Test push
         run: |
           echo "PR was merged into master."
+
+      
+      - name: Configure Git identity
+        run: |
+          git config user.name "Vaishnavi3338"
+          git config user.email "vaishnavilakkarusu@gmail.com"
+
           
 
       - name: Create new file
