@@ -1,21 +1,16 @@
 
-# .github/workflows/on-pr-merged.yml
 name: Run on PR merged to master
 
 on:
-  # Manual run
   workflow_dispatch:
 
-  # External POST-trigger
   repository_dispatch:
     types: [externally-triggered-job]
 
-  # Pushes to master (or main)
   push:
     branches:
-      - main   # change to "master" if needed
+      - master
 
-  # Trigger after the merge workflow completes
   workflow_run:
     workflows: ["Auto_PR_for_manifests_branches"]
     types:
@@ -23,9 +18,6 @@ on:
 
 jobs:
   build:
-    # Conditions:
-    # - run for push/dispatch
-    # - run for workflow_run only if success
     if: >
       github.event_name != 'workflow_run' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
@@ -33,9 +25,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Switch to master (only for workflow_run)
+        if: ${{ github.event_name == 'workflow_run' }}
+        run: |
+          git fetch origin
+          git checkout master
+          git pull origin master
 
       - name: Test push
         run: |
           echo "PR was merged into master."
-          git push origin HEAD:test_trigger
+          
+
+      - name: Create new file
+        run: |
+          echo "sample" > test.txt
+
+      - name: Commit and Push Changes
+        run: |
+          git add .
+          git commit -m "Automated change" || echo "Nothing to commit"
+          git push origin master
